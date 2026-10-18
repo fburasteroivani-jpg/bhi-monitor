@@ -13,6 +13,7 @@ if(!window.claude){window.claude={use:async function(c){if(c!=='downloads')retur
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="precios-iol.js"></script>
 <style>
 :root{
   --paper:#ffffff; --panel:#f3f5f8; --panel2:#e9edf3; --rule:#d5dbe3; --ink:#0f1d30; --muted:#5b6878;
@@ -2377,12 +2378,19 @@ const ANCHOR_DATE=Date.UTC(2026,8,24),ANCHOR_TAM=0.236;
 function tradeDay(t){let x=t-DAY;while([0,6].includes(new Date(x).getUTCDay()))x-=DAY;return x}
 const fechaTxt=t=>`Cierre del ${dmy(tradeDay(t)).slice(0,5)} (liquidación ${dmy(t).slice(0,5)})`;
 function iolSym(b){if(b.iol)return b.iol;const t=b.t;if(b.grupo==='Bonar'||b.grupo==='Global')return t+'D';return /O$/.test(t)?t.slice(0,-1)+'D':t+'D'}
-function settleDate(){const n=new Date(Date.now()-3*3600e3);let t=Date.UTC(n.getUTCFullYear(),n.getUTCMonth(),n.getUTCDate())+DAY;
+function settleDate(at){const n=new Date((at||Date.now())-3*3600e3);let t=Date.UTC(n.getUTCFullYear(),n.getUTCMonth(),n.getUTCDate())+DAY;
   while([0,6].includes(new Date(t).getUTCDay()))t+=DAY;return t}
 let IOL=null;
 let IOL_READY=null;
+/* fuera de claude.ai no hay conector: se usan los precios de IOL que Claude deja en precios-iol.js (cierre de una rueda) */
+const SNAP=window.IOL_SNAP&&window.IOL_SNAP.q&&window.IOL_SNAP.at?window.IOL_SNAP:null;let IOL_IS_SNAP=false;
+const snapIOL={callTool:async(sv,tool,a)=>{const p=tool==='get_asset_quote'&&SNAP.q[(a.market||'BCBA')+':'+a.symbol];if(p)return{payload:p};throw{code:'tool_error'}}};
+const snapTxt=()=>SNAP?dmy(SNAP.at-3*3600e3).slice(0,5):'';
+async function snapApply(){if(!SNAP)return;IOL=snapIOL;try{await iolUpdate()}finally{IOL=null;renderFresh()}}
 async function iolInit(){try{IOL=await window.claude?.use?.('mcp')}catch(e){IOL=null}
-  el('iolBtn').hidden=!IOL;el('iolNo').hidden=!!IOL;renderMepSrc();if(IOL)await iolMep(false).catch(()=>{});}
+  if(!IOL&&SNAP){IOL_IS_SNAP=true;el('iolBtn').textContent=`Cargar precios de IOL del cierre ${snapTxt()}`}
+  el('iolBtn').hidden=!IOL&&!IOL_IS_SNAP;el('iolNo').hidden=!!IOL||IOL_IS_SNAP;renderMepSrc();if(IOL)await iolMep(false).catch(()=>{});
+  if(IOL_IS_SNAP&&!(ST.lastSnap>=SNAP.at))await snapApply().catch(e=>console.error('snap',e));}
 /* valor técnico (por 100 VN) de un bono CER según IOL, para la fecha de liquidación */
 async function iolVT(t){if(!IOL)return NaN;const r=await IOL.callTool(IOL_SERVER,'get_fixed_income_analytics',{ticker:t},{cache:false});const p=typeof r.payload==='string'?JSON.parse(r.payload):r.payload;return +(p&&p.prices&&p.prices.technical_value)}
 /* valor técnico a usar: el de IOL si es de esa fecha de liquidación; si no, el de Docta del 24/09 llevado con el CER */
@@ -2583,7 +2591,8 @@ function tamFix(){const H=ST.arsHist||{},dirty={};let n=0;if(!ST.ars||!ST.ars.bo
 function arsSnap(k,rows){ST.arsHist=ST.arsHist||{};(ST.ahDirty=ST.ahDirty||{})[k.slice(0,7)]=true;const o=ST.arsHist[k]=ST.arsHist[k]||{};rows.forEach(([t,p,y,pv])=>{o[t]=[+(+p).toFixed(4),y==null?null:+y.toFixed(3)];if(pv)o[t].push(1)});const ks=Object.keys(ST.arsHist).sort();while(ks.length>400)delete ST.arsHist[ks.shift()]}
 async function iolUpdate(){
   const btn=el('iolBtn'),st=el('iolSt');btn.disabled=true;
-  const S2=settleDate(),jobs=[];
+  const snapM=IOL_IS_SNAP&&IOL===snapIOL,NOW=snapM?SNAP.at:Date.now();
+  const S2=settleDate(snapM?SNAP.at:0),jobs=[];
   ST.bonds.forEach(b=>jobs.push({k:'u',b,sym:iolSym(b)}));
   ST.ars.bonds.forEach(b=>{if(LECAP_PF[b.t]||CER_VT[b.t]||TAM_ANCHOR[b.t]||b.tipo==='dl'||(b.tipo==='dual'&&Number.isFinite(num(b.usd))))jobs.push({k:'a',b,sym:b.t})});
   const res=new Map(),fails=[];let done=0,fatal=null;
@@ -2618,11 +2627,11 @@ async function iolUpdate(){
       b.mg=+((365*(Math.pow(C/P,1/d)-1)-T0)*100).toFixed(2);nA++}
     // dollar linked: tasa en dólares al oficial de hoy (convención de mercado: A3500 × 100 / precio)
     if((b.tipo==='dl'||(b.tipo==='dual'&&Number.isFinite(num(b.usd))))&&num(ST.ars.a.fx0)>0&&!LECAP_PF[b.t]&&!CER_VT[b.t]){b.usd=+((Math.pow(num(ST.ars.a.fx0)*100/P,365/d)-1)*100).toFixed(2);nA++}
-    b.px=P;b.nota='IOL '+dmy(Date.now()-3*3600e3)+adjTxt(q);{const q=arsYield(b,P,S2,X,T0);(ST._snap=ST._snap||[]).push([b.t,P,q?q.y:null,q&&q.prov?1:0])}}
+    b.px=P;b.nota='IOL '+dmy(NOW-3*3600e3)+adjTxt(q);{const q=arsYield(b,P,S2,X,T0);(ST._snap=ST._snap||[]).push([b.t,P,q?q.y:null,q&&q.prov?1:0])}}
   ST.bonds.forEach(b=>{const x=basics(b);if(x&&Number.isFinite(x.y0)&&!tirBad(b,x))(ST._snap=ST._snap||[]).push(['u:'+b.t,x.p0,x.y0*100])});
   setTimeout(()=>{try{mktAuto()}catch(e){}},0);
-  if(ST._snap){arsSnap(iso(Date.now()-3*3600e3),ST._snap);try{tirCheck(iso(Date.now()-3*3600e3))}catch(e){console.error('tirCheck',e)}delete ST._snap;docAuto();const dm=Object.keys(ST.ahDirty||{});ST.ahDirty={};ahPush(dm)}
-  ST.lastIOL=Date.now();save();syncParams();renderBonds();renderFilters();renderArsBonds();renderArsFilters();renderAssump();
+  if(ST._snap){arsSnap(iso(NOW-3*3600e3),ST._snap);try{tirCheck(iso(NOW-3*3600e3))}catch(e){console.error('tirCheck',e)}delete ST._snap;docAuto();const dm=Object.keys(ST.ahDirty||{});ST.ahDirty={};ahPush(dm)}
+  ST.lastIOL=NOW;if(snapM)ST.lastSnap=SNAP.at;save();syncParams();renderBonds();renderFilters();renderArsBonds();renderArsFilters();renderAssump();
   await iolMep(true);trAutoAll();
   const cur=document.querySelector('section.tab.on');show(cur?cur.id:'sim');
   st.textContent=`Actualizado: ${nU} bonos en dólares y ${nA} datos en pesos, liquidación ${dmy(S2)}.`+(fails.length?` Sin precio: ${fails.slice(0,10).join(', ')}${fails.length>10?'…':''}.`:'')+(ST.mepAt&&Date.now()-ST.mepAt<60e3?` Dólar MEP: $ ${Math.round(num(ST.ars.a.mep0)).toLocaleString('es-AR')}.`:'')+(adjL.length?` Con el último precio lejos de la punta o del VWAP (más de ${fmt(PX_TOL*100,1)}%), se usó la referencia en: ${adjL.join(', ')}.`:'')+' Riesgo país, tasa de EE.UU. y TAMAR se cargan a mano.';
@@ -2664,6 +2673,7 @@ let PX_RUN=false;
 async function pxAuto(){renderFresh();if(!IOL||PX_RUN||document.hidden||el('iolBtn').disabled||!needPx())return;PX_RUN=true;renderFresh();try{await iolUpdate()}catch(e){console.error(e)}finally{PX_RUN=false;renderFresh()}}
 function renderFresh(){const n=el('pxFresh');if(!n)return;const f=t=>new Date(t).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
   if(PX_RUN){n.className='fresh run';n.textContent='Actualizando precios desde IOL…';return}
+  if(IOL_IS_SNAP&&!IOL){n.className='fresh ok';n.textContent=`Precios de IOL al cierre del ${snapTxt()}. Para tenerlos en vivo, abrí el simulador desde claude.ai con el conector de IOL.`;return}
   if(!needPx()){n.className='fresh ok';n.textContent=inRueda()?`Precios al día (IOL ${f(ST.lastIOL)}). Se actualizan solos cada 15 minutos durante la rueda.`:`Precios al día: incluyen el cierre del ${dmy(closedDay()).slice(0,5)} (IOL ${f(ST.lastIOL)}).`;return}
   n.className='fresh bad';n.textContent=(ST.lastIOL?`Precios desactualizados: el último dato de IOL es del ${f(ST.lastIOL)}.`:'Precios desactualizados: son los cargados a mano al cierre del 23/09.')+(IOL?' Actualizando…':' Abrí el simulador desde claude.ai con el conector de IOL activo y se actualizan solos.')}
 setInterval(()=>{pxAuto();try{renderMktRef()}catch(e){}},60e3);
@@ -3284,7 +3294,7 @@ async function trSyncAll(){const T=ST.track||{},ks=Object.keys(T);if(!ks.length)
   SEG.syncMsg=errs.length?'No se pudieron traer los precios de IOL. '+errs.join(' · '):'';
   if(st){st.textContent=errs.length?SEG.syncMsg:(tot?`Listo: se actualizaron ${tot} días con los precios de IOL.`:'Todo al día.');st.className='status '+(errs.length?'dn':'up')}
   ks.forEach(k=>{if(!T[k].hist.length)trRecord(k,true)});renderSeg()}
-function trAutoAll(){const T=ST.track||{};if(!Object.keys(T).length)return;if(IOL)trSyncAll();else{Object.keys(T).forEach(k=>{const h=T[k].hist;if(!h.length||h[h.length-1].d<trKey())trRecord(k,true)});renderSeg()}}
+function trAutoAll(){const T=ST.track||{};if(!Object.keys(T).length)return;if(IOL&&!IOL_IS_SNAP)trSyncAll();else{Object.keys(T).forEach(k=>{const h=T[k].hist;if(!h.length||h[h.length-1].d<trKey())trRecord(k,true)});renderSeg()}}
 function trClean(tr){ // posiciones vendidas por completo: sin nominales no valen nada
   let n=0;['usd','ars'].forEach(side=>{const P=tr&&tr.pos&&tr.pos[side];if(!P)return;
     Object.entries(P).forEach(([t,p])=>{if(!p||p.vnFix)return;const vn=Math.abs(p.vn||0),last=p.last||0;
@@ -5614,7 +5624,7 @@ try{const add=(o)=>{if(!ST.bonds.some(b=>b.t===o.t)){ST.bonds.push(Object.assign
    ch=add({t:'MGCRO',grupo:'ON',ley:'NY',p:103.15,br:0.25,nota:'ON Pampa Energía Clase 26 (ley extranjera). Cupón 7,75% anual semestral (14/05 y 14/11), capital al vencimiento el 14/11/2037.',f})||ch}
   if(ch)save()}catch(e){console.error(e)}
 try{let ch=0;if(!ST.bonds.some(b=>b.t==='TSC3O')){ST.bonds.push({id:'TSC3O',t:'TSC3O',grupo:'ON',ley:'NY',p:109.05,monto:'',bu:1,br:0.25,dn:'',de:'',adj:0,f:verFlows('TSC3O')});ch++}ST.bonds.forEach(b=>{const vf=verFlows(b.t);if(vf&&JSON.stringify(vf)!==JSON.stringify(b.f)){b.f=vf;ch++}});if(ch){save();try{changed(false)}catch(e){}}}catch(e){}
-cedInit();pfInit();fciInit();tamFwdInit();cedInit2();fundInit();try{mktFApply()}catch(e){}el('iolBtn').onclick=iolUpdate;bindOff();el('miBtn').onclick=()=>miLoad(true);el('onAdd').onclick=()=>onRun(el('onIn').value.split(/[\s,;]+/));el('onRefresh').onclick=()=>onRun(ST.bonds.filter(b=>b.grupo==='ON').map(b=>b.t));renderIolStamp();IOL_READY=iolInit();
+cedInit();pfInit();fciInit();tamFwdInit();cedInit2();fundInit();try{mktFApply()}catch(e){}el('iolBtn').onclick=()=>IOL_IS_SNAP?snapApply():iolUpdate();bindOff();el('miBtn').onclick=()=>miLoad(true);el('onAdd').onclick=()=>onRun(el('onIn').value.split(/[\s,;]+/));el('onRefresh').onclick=()=>onRun(ST.bonds.filter(b=>b.grupo==='ON').map(b=>b.t));renderIolStamp();IOL_READY=iolInit();
 /* PVC6O a valor técnico (100 + TAMAR + 3,5% devengado): se saca el precio fijo de 99,70 y se recalcula Puerto W una vez desde el inicio */
 IOL_READY.then(()=>setTimeout(async()=>{try{const N='Puerto W',tr=(ST.track||{})[N];if(ST.pvAcc1||!IOL||!tr||!CLOUD.ok)return;const p=tr.pos&&tr.pos.ars&&tr.pos.ars.PVC6O;if(p)delete p.pxFix;
   if(tr.nota)tr.nota=tr.nota.replace(/PVC6O sin cotización en IOL: valuado al precio que usa Valiant \(99,70\), fijado a mano\./,'PVC6O sin cotización en IOL: valor técnico 100 más lo devengado a TAMAR + 3,5% desde el último cupón (vuelve a 100 en cada pago).').replace(/PVC6O al precio de Valiant \(99,70\) y /,'');
